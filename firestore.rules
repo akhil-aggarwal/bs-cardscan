@@ -1,7 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Only these Google / email accounts can read or write leads.
+    // Only these Google / email accounts can read or write anything.
     // Replace the email below with yours (add teammates the same way).
     function allowed() {
       return request.auth != null
@@ -11,6 +11,10 @@ service cloud.firestore {
       allow read, write: if allowed();
     }
     match /settings/{id} {
+      allow read, write: if allowed();
+    }
+    // Error log (Settings → Error log)
+    match /logs/{id} {
       allow read, write: if allowed();
     }
   }

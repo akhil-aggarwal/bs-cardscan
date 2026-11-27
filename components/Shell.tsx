@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApp } from "./AppProvider";
+import { effectiveEx, exName } from "@/lib/leads";
 
 const TABS = [
   { href: "/", label: "Scan card" },
@@ -12,13 +13,13 @@ const TABS = [
 
 export default function Shell({ children }: { children: ReactNode }) {
   const path = usePathname();
-  const { leads, offline } = useApp();
+  const { leads, offline, settings } = useApp();
   return (
     <>
       <header className="top">
         <div className="tbar">
-          <h1>Card Scanner<small>Indusfood buyer leads</small></h1>
-          <div className="count"><span className="num">{leads.length}</span><small>leads</small></div>
+          <h1>Card Scanner<small>Now: {exName(effectiveEx(settings), settings)}</small></h1>
+          <div className="count"><span className="num">{leads.length}</span><small>cards</small></div>
         </div>
         <nav className="tabs">
           {TABS.map((t) => (

@@ -4,10 +4,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useApp } from "@/components/AppProvider";
 import Shell from "@/components/Shell";
 import LeadFields from "@/components/LeadFields";
-import { downloadCsv, isDue, STAGES, toTsv, waLink, type Lead, type LeadFields as Fields } from "@/lib/leads";
-
-const fmt = (ts: number) => new Date(ts).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
-const fmtDate = (d: string) => new Date(d + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+import { useFileShare } from "@/components/useFileShare";
+import {
+  BUYER_STAGES, VENDOR_STAGES, WON, downloadCsv, effectiveEx, exName, fmtDate, fmtDayShort, groupCompanies, isDue, lastVisit,
+  stagesFor, toTsv, waLink, type Lead, type LeadFields as Fields,
+} from "@/lib/leads";
 
 function Bars({ title, rows }: { title: string; rows: [string, number][] }) {
   const max = Math.max(1, ...rows.map((r) => r[1]));
@@ -21,10 +22,26 @@ function Bars({ title, rows }: { title: string; rows: [string, number][] }) {
   );
 }
 
+function Seg<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: [T, string][]; label: string }) {
+  return (
+    <div className="seg" role="group" aria-label={label}>
+      {options.map(([v, t]) => <button key={v} type="button" aria-pressed={value === v} onClick={() => onChange(v)}>{t}</button>)}
+    </div>
+  );
+}
+
+const ALL_STAGES = [...new Set([...BUYER_STAGES, ...VENDOR_STAGES])];
+
 function Dashboard() {
   const { leads, settings, patchLead, deleteLead, loading } = useApp();
+  const { canShare, share } = useFileShare(settings);
   const params = useSearchParams();
   const router = useRouter();
+  const cur = effectiveEx(settings);
+  const [fEx, setFEx] = useState<string | null>(null); // null = not chosen yet → current exhibition
+  const exSel = fEx ?? (cur || "all");
+  const [kind, setKind] = useState<"all" | "Buyer" | "Vendor">("all");
+  const [view, setView] = useState<"people" | "companies">("people");
   const [q, setQ] = useState("");
   const [fInt, setFInt] = useState("");
   const [fStage, setFStage] = useState("");
@@ -34,7 +51,7 @@ function Dashboard() {
   const [edit, setEdit] = useState<{ id: string; v: Fields } | null>(null);
   const [confirmDel, setConfirmDel] = useState<Lead | null>(null);
 
-  // Open the editor when coming from "Edit" on the scan page.
+  // Open the editor when coming from "Edit" or "Open existing" on the scan page.
   const editParam = params.get("edit");
   useEffect(() => {
     if (!editParam) return;
@@ -53,123 +70,188 @@ function Dashboard() {
   }
   const markSent = (l: Pick<Lead, "id" | "stage">) => void patchLead(l.id, { waSent: Date.now(), stage: l.stage === "New" ? "Contacted" : l.stage });
 
-  const n = leads.length;
-  const count = (f: (l: Lead) => boolean) => leads.filter(f).length;
-  const sent = count((l) => !!l.waSent), hot = count((l) => l.interest === "Hot"), due = count(isDue), won = count((l) => l.stage === "Order won");
+  /* scope = chosen exhibition + buyers/vendors; everything on the page follows it */
+  const scope = useMemo(() => leads.filter((l) =>
+    (exSel === "all" || (exSel === "none" ? l.visits.every((v) => !v.ex) : l.visits.some((v) => v.ex === exSel))) &&
+    (kind === "all" || l.kind === kind)), [leads, exSel, kind]);
+
+  const n = scope.length;
+  const count = (f: (l: Lead) => boolean) => scope.filter(f).length;
+  const sent = count((l) => !!l.waSent), hot = count((l) => l.interest === "Hot"), due = count(isDue), won = count((l) => WON.includes(l.stage));
+  const stageList = kind === "all" ? ALL_STAGES : stagesFor(kind);
 
   const locations = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const l of leads) {
+    for (const l of scope) {
       const k = (l.country && !/^india$/i.test(l.country) ? l.country : l.city || l.country).trim();
       if (k) m[k] = (m[k] || 0) + 1;
     }
     return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  }, [leads]);
+  }, [scope]);
+
+  const byEx = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const l of scope) for (const ex of new Set(l.visits.map((v) => v.ex))) m[exName(ex, settings)] = (m[exName(ex, settings)] || 0) + 1;
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  }, [scope, settings]);
 
   const rows = useMemo(() => {
     const s = q.trim().toLowerCase();
-    const r = leads.filter((l) =>
+    const r = scope.filter((l) =>
       (!s || [l.name, l.company, l.city, l.country, l.phones, l.email, l.notes, l.products, l.designation].join(" ").toLowerCase().includes(s)) &&
       (!fInt || (fInt === "-" ? !l.interest : l.interest === fInt)) &&
       (!fStage || (fStage === "due" ? isDue(l) : l.stage === fStage)) &&
       (!fWa || (fWa === "yes" ? !!l.waSent : !l.waSent)));
     const ir: Record<string, number> = { Hot: 0, Warm: 1, Cold: 2 };
+    const lastAt = (l: Lead) => l.visits[l.visits.length - 1]?.at || l.createdAt;
     const by: Record<string, (a: Lead, b: Lead) => number> = {
-      new: (a, b) => b.createdAt - a.createdAt,
-      old: (a, b) => a.createdAt - b.createdAt,
+      new: (a, b) => lastAt(b) - lastAt(a),
+      old: (a, b) => lastAt(a) - lastAt(b),
       name: (a, b) => (a.name || "~").localeCompare(b.name || "~"),
+      company: (a, b) => (a.company || "~").localeCompare(b.company || "~"),
       int: (a, b) => (ir[a.interest] ?? 3) - (ir[b.interest] ?? 3),
       fu: (a, b) => (a.followUp || "9999").localeCompare(b.followUp || "9999"),
     };
     return r.sort(by[sort]);
-  }, [leads, q, fInt, fStage, fWa, sort]);
+  }, [scope, q, fInt, fStage, fWa, sort]);
 
-  const quick = (kind: string, v: string) => {
-    setQ(""); setFInt(kind === "int" ? v : ""); setFStage(kind === "stage" ? v : ""); setFWa(kind === "wa" ? v : "");
+  const companies = useMemo(() => groupCompanies(rows), [rows]);
+
+  const quick = (k: string, v: string) => {
+    setQ(""); setFInt(k === "int" ? v : ""); setFStage(k === "stage" ? v : ""); setFWa(k === "wa" ? v : "");
+    if (k === "won") setFStage(kind === "Vendor" ? "Approved vendor" : "Order won");
     document.getElementById("all")?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const title = n ? [`${n} leads`, hot ? `${hot} hot` : "", n - sent ? `${n - sent} still to WhatsApp` : ""].filter(Boolean).join(", ") : "Leads dashboard";
+  const scopeLabel = `${exSel === "all" ? "All exhibitions" : exName(exSel === "none" ? "" : exSel, settings)}${kind === "all" ? "" : ` – ${kind}s`}`;
   const editLink = edit ? waLink(edit.v, settings) : "";
+  const pdfOk = (k: string) => canShare && k === "Buyer";
+
+  const Actions = ({ l }: { l: Lead }) => {
+    const wl = waLink(l, settings);
+    return (
+      <div className="acts">
+        {wl ? <a className="btn wa" href={wl} target="_blank" rel="noopener noreferrer" onClick={() => markSent(l)}>WhatsApp{l.waSent ? " again" : ""}</a> : <span className="m">No number</span>}
+        {pdfOk(l.kind) && <button className="btn wa-out" onClick={() => void share(l).then((ok) => { if (ok) markSent(l); })}>Send PDF</button>}
+        <button className="btn" onClick={() => openEdit(l)}>Edit</button>
+      </div>
+    );
+  };
 
   return (
     <Shell>
       <main className="wrap">
+        <section className="scopebar">
+          <label className="f">Exhibition
+            <select value={exSel} onChange={(e) => { setFEx(e.target.value); setFStage(""); }}>
+              <option value="all">All exhibitions</option>
+              {settings.exhibitions.map((x) => <option key={x.id} value={x.id}>{x.name}{x.id === cur ? " (current)" : ""}</option>)}
+              <option value="none">No exhibition</option>
+            </select>
+          </label>
+          <Seg label="Buyers or vendors" value={kind} onChange={(v) => { setKind(v); setFStage(""); }} options={[["all", "All"], ["Buyer", "Buyers"], ["Vendor", "Vendors"]]} />
+        </section>
+
         <section>
-          <h2>{loading ? "Loading leads…" : title}</h2>
+          <h2>{loading ? "Loading…" : n ? `${scopeLabel}: ${n} card${n === 1 ? "" : "s"}` : scopeLabel}</h2>
           <div className="kpis">
-            <button className="kpi" onClick={() => quick("", "")}><span className="num">{n}</span><span>Total leads</span></button>
-            <button className="kpi hot" onClick={() => quick("int", "Hot")}><span className="num">{hot}</span><span>Hot leads</span></button>
+            <button className="kpi" onClick={() => quick("", "")}><span className="num">{n}</span><span>Cards</span></button>
+            <button className="kpi hot" onClick={() => quick("int", "Hot")}><span className="num">{hot}</span><span>Hot</span></button>
             <button className="kpi" onClick={() => quick("wa", "no")}><span className="num">{n - sent}</span><span>WhatsApp not sent</span></button>
             <button className="kpi due" onClick={() => quick("stage", "due")}><span className="num">{due}</span><span>Follow-ups due</span></button>
-            <button className="kpi" onClick={() => quick("stage", "Order won")}><span className="num">{won}</span><span>Orders won</span></button>
+            <button className="kpi" onClick={() => quick("won", "")}><span className="num">{won}</span><span>{kind === "Vendor" ? "Approved vendors" : kind === "Buyer" ? "Orders won" : "Orders won / approved"}</span></button>
           </div>
         </section>
 
         <section className="panels">
-          <Bars title="Pipeline stage" rows={STAGES.map((s) => [s, count((l) => l.stage === s)] as [string, number]).filter((r) => r[1])} />
-          <Bars title="Interest" rows={([["Hot", hot], ["Warm", count((l) => l.interest === "Warm")], ["Cold", count((l) => l.interest === "Cold")], ["Not marked", count((l) => !l.interest)]] as [string, number][]).filter((r) => r[1])} />
+          <Bars title="Stage" rows={stageList.map((s) => [s, count((l) => l.stage === s)] as [string, number]).filter((r) => r[1])} />
+          {exSel === "all"
+            ? <Bars title="By exhibition" rows={byEx} />
+            : <Bars title="Interest" rows={([["Hot", hot], ["Warm", count((l) => l.interest === "Warm")], ["Cold", count((l) => l.interest === "Cold")], ["Not marked", count((l) => !l.interest)]] as [string, number][]).filter((r) => r[1])} />}
           <Bars title="Top locations" rows={locations} />
         </section>
 
         <section id="all">
-          <h2>All leads</h2>
+          <div className="listhead">
+            <h2>{view === "people" ? "People" : "Companies"}</h2>
+            <Seg label="View" value={view} onChange={setView} options={[["people", "People"], ["companies", "Companies"]]} />
+          </div>
           <div className="filters">
-            <input type="search" className="full" placeholder="Search name, company, city, notes…" aria-label="Search leads" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input type="search" className="full" placeholder="Search name, company, city, notes, products…" aria-label="Search" value={q} onChange={(e) => setQ(e.target.value)} />
             <select aria-label="Filter by interest" value={fInt} onChange={(e) => setFInt(e.target.value)}>
               <option value="">All interest</option><option>Hot</option><option>Warm</option><option>Cold</option><option value="-">Not marked</option>
             </select>
             <select aria-label="Filter by stage" value={fStage} onChange={(e) => setFStage(e.target.value)}>
-              <option value="">All stages</option><option value="due">Follow-up due</option>{STAGES.map((s) => <option key={s}>{s}</option>)}
+              <option value="">All stages</option><option value="due">Follow-up due</option>{stageList.map((s) => <option key={s}>{s}</option>)}
             </select>
             <select aria-label="Filter by WhatsApp" value={fWa} onChange={(e) => setFWa(e.target.value)}>
               <option value="">WhatsApp: all</option><option value="no">Not yet sent</option><option value="yes">Sent</option>
             </select>
             <select aria-label="Sort" value={sort} onChange={(e) => setSort(e.target.value)}>
-              <option value="new">Newest first</option><option value="old">Oldest first</option><option value="name">Name A–Z</option><option value="int">Hot first</option><option value="fu">Follow-up date</option>
+              <option value="new">Newest meeting first</option><option value="old">Oldest first</option><option value="name">Name A–Z</option><option value="company">Company A–Z</option><option value="int">Hot first</option><option value="fu">Follow-up date</option>
             </select>
           </div>
           <div className="row">
-            <button className="btn" onClick={() => (n ? downloadCsv(leads) : setNote("No leads to export yet."))}>Download CSV</button>
+            <button className="btn" onClick={() => (rows.length ? downloadCsv(rows, settings, scopeLabel) : setNote("Nothing to export."))}>Download CSV ({rows.length})</button>
             <button className="btn" onClick={async () => {
-              if (!n) return setNote("No leads to copy yet.");
-              try { await navigator.clipboard.writeText(toTsv(leads)); setNote(`Copied ${n} leads. Open a Google Sheet, tap cell A1 and paste.`); }
+              if (!rows.length) return setNote("Nothing to copy.");
+              try { await navigator.clipboard.writeText(toTsv(rows, settings)); setNote(`Copied ${rows.length} cards. Open a Google Sheet, tap cell A1 and paste.`); }
               catch { setNote("Copy was blocked by the browser."); }
             }}>Copy for Google Sheets</button>
           </div>
-          <p className="muted small">{note || (n ? `Showing ${rows.length} of ${n}.` : "")}</p>
+          <p className="muted small">{note || (n ? `Showing ${rows.length} of ${n}${view === "companies" ? ` · ${companies.filter((c) => c.key !== "__none__").length} companies` : ""}.` : "")}</p>
 
-          {!n ? <div className="empty">No leads yet. Scan your first card from the Scan tab.</div>
-            : !rows.length ? <div className="empty">No leads match these filters.</div>
-            : (
+          {!leads.length ? <div className="empty">No cards yet. Scan your first card from the Scan tab.</div>
+            : !n ? <div className="empty">No cards for {scopeLabel} yet.</div>
+            : !rows.length ? <div className="empty">No cards match these filters.</div>
+            : view === "companies" ? (
+              <div className="companies">
+                {companies.map((c) => (
+                  <div className="co" key={c.key}>
+                    <div className="co-head">
+                      <b>{c.name}</b>
+                      <span className="m">{c.people.length} {c.people.length === 1 ? "person" : "people"}{c.kinds.map((k) => <span key={k} className={`tag k-${k}`}>{k}</span>)}</span>
+                    </div>
+                    {c.people.map((l) => {
+                      const lv = lastVisit(l, settings);
+                      return (
+                        <div className="co-p" key={l.id}>
+                          <div>
+                            <b>{l.name || "(no name)"}</b>{l.designation && <span className="m"> – {l.designation}</span>}
+                            {c.key === "__none__" && l.company && <span className="m"> · {l.company}</span>}
+                            <div className="m">{l.phones}{l.phones && " · "}{lv.label}{lv.more ? ` (+${lv.more})` : ""} · {l.stage}</div>
+                          </div>
+                          <Actions l={l} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            ) : (
               <table className="stack">
-                <thead><tr><th>Lead</th><th>Contact</th><th>Location</th><th>Interest</th><th>Stage</th><th>Follow-up</th><th>Notes</th><th /></tr></thead>
+                <thead><tr><th>Person</th><th>Contact</th><th>Met</th><th>Interest</th><th>Stage</th><th>Follow-up</th><th>Notes</th><th /></tr></thead>
                 <tbody>
                   {rows.map((l) => {
-                    const wl = waLink(l, settings);
+                    const lv = lastVisit(l, settings);
                     return (
                       <tr key={l.id} className={isDue(l) ? "due" : ""}>
-                        <td data-l="Lead"><b>{l.name || "(no name)"}</b><div className="m">{[l.designation, l.company].filter(Boolean).join(", ")}</div><div className="m">Scanned {fmt(l.createdAt)}</div></td>
-                        <td data-l="Contact"><div>{l.phones}</div><div className="m">{l.email}</div></td>
-                        <td data-l="Location">{[l.city, l.country].filter(Boolean).join(", ")}</td>
+                        <td data-l="Person"><b>{l.name || "(no name)"}</b><span className={`tag k-${l.kind}`}>{l.kind}</span><div className="m">{[l.designation, l.company].filter(Boolean).join(", ")}</div>{l.products && <div className="m">{l.kind === "Vendor" ? "Supplies: " : ""}{l.products}</div>}</td>
+                        <td data-l="Contact"><div>{l.phones}</div><div className="m">{l.email}</div><div className="m">{[l.city, l.country].filter(Boolean).join(", ")}</div></td>
+                        <td data-l="Met"><div>{lv.label}</div>{lv.more > 0 && <div className="m">+{lv.more} earlier meeting{lv.more > 1 ? "s" : ""}</div>}</td>
                         <td data-l="Interest">
                           <select aria-label="Interest" value={l.interest} onChange={(e) => void patchLead(l.id, { interest: e.target.value as Lead["interest"] })}>
                             <option value="">—</option><option>Hot</option><option>Warm</option><option>Cold</option>
                           </select>
                         </td>
                         <td data-l="Stage">
-                          <select aria-label="Stage" value={l.stage} onChange={(e) => void patchLead(l.id, { stage: e.target.value as Lead["stage"] })}>
-                            {STAGES.map((s) => <option key={s}>{s}</option>)}
+                          <select aria-label="Stage" value={l.stage} onChange={(e) => void patchLead(l.id, { stage: e.target.value })}>
+                            {stagesFor(l.kind).map((s) => <option key={s}>{s}</option>)}
                           </select>
                         </td>
                         <td data-l="Follow-up">{l.followUp && <>{fmtDate(l.followUp)}{isDue(l) && <b className="duetxt"> due</b>}</>}</td>
                         <td data-l="Notes"><div className="clip">{l.notes}</div></td>
-                        <td data-l="">
-                          <div className="acts">
-                            {wl ? <a className="btn wa" href={wl} target="_blank" rel="noopener noreferrer" onClick={() => markSent(l)}>WhatsApp{l.waSent ? " again" : ""}</a> : <span className="m">No number</span>}
-                            <button className="btn" onClick={() => openEdit(l)}>Edit</button>
-                          </div>
-                        </td>
+                        <td data-l=""><Actions l={l} /></td>
                       </tr>
                     );
                   })}
@@ -182,8 +264,9 @@ function Dashboard() {
       {edit && (
         <div className="ov" role="dialog" aria-modal="true" aria-labelledby="edH" onClick={(e) => e.target === e.currentTarget && setEdit(null)}>
           <div className="sheet">
-            <h2 id="edH">Edit {edit.v.name || edit.v.company || "lead"}</h2>
-            <LeadFields value={edit.v} onChange={(v) => setEdit({ ...edit, v })} showStage />
+            <h2 id="edH">Edit {edit.v.name || edit.v.company || "card"}</h2>
+            <p className="m">First scanned {fmtDayShort(leads.find((x) => x.id === edit.id)?.createdAt || 0)}</p>
+            <LeadFields value={edit.v} onChange={(v) => setEdit({ ...edit, v })} settings={settings} showStage />
             <div className="row">
               <a className="btn wa" href={editLink || undefined} aria-disabled={!editLink} target="_blank" rel="noopener noreferrer"
                 onClick={(e) => {
@@ -191,10 +274,14 @@ function Dashboard() {
                   void patchLead(edit.id, { ...edit.v, waSent: Date.now(), stage: edit.v.stage === "New" ? "Contacted" : edit.v.stage });
                   setEdit(null);
                 }}>WhatsApp</a>
+              {pdfOk(edit.v.kind) && <button className="btn wa-out" onClick={() => {
+                const e = edit;
+                void share(e.v).then((ok) => { if (ok) { void patchLead(e.id, { ...e.v, waSent: Date.now(), stage: e.v.stage === "New" ? "Contacted" : e.v.stage }); setEdit(null); } });
+              }}>Send PDF</button>}
               <button className="btn pri" onClick={() => { void patchLead(edit.id, edit.v); setEdit(null); }}>Save changes</button>
               <button className="btn" onClick={() => setEdit(null)}>Cancel</button>
             </div>
-            <div className="row"><button className="btn danger-txt" onClick={() => { setConfirmDel(leads.find((x) => x.id === edit.id) || null); setEdit(null); }}>Delete lead</button></div>
+            <div className="row"><button className="btn danger-txt" onClick={() => { setConfirmDel(leads.find((x) => x.id === edit.id) || null); setEdit(null); }}>Delete card</button></div>
           </div>
         </div>
       )}
@@ -202,8 +289,8 @@ function Dashboard() {
       {confirmDel && (
         <div className="ov" role="dialog" aria-modal="true">
           <div className="sheet">
-            <h2>Delete this lead?</h2>
-            <p>{confirmDel.name || confirmDel.company || "This lead"} will be removed for good.</p>
+            <h2>Delete this card?</h2>
+            <p>{confirmDel.name || confirmDel.company || "This card"} will be removed for good.</p>
             <div className="row">
               <button className="btn danger" onClick={() => { void deleteLead(confirmDel.id); setConfirmDel(null); }}>Delete</button>
               <button className="btn" onClick={() => setConfirmDel(null)}>Cancel</button>

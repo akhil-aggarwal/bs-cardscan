@@ -22,3 +22,17 @@ export function allowedEmails(): string[] {
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
 }
+
+/** Throws a Response-like error message when the token is missing, invalid or not on the allow-list. */
+export async function requireAllowedUser(token: string | null | undefined): Promise<{ uid: string; email: string }> {
+  if (!token) throw new Error("Please sign in again.");
+  let u: { uid: string; email: string };
+  try {
+    u = await verifyFirebaseToken(token);
+  } catch {
+    throw new Error("Your login has expired. Please sign in again.");
+  }
+  const allow = allowedEmails();
+  if (allow.length && !allow.includes(u.email)) throw new Error("This account is not allowed.");
+  return u;
+}

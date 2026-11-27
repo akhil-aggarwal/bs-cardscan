@@ -5,7 +5,10 @@ import {
 } from "firebase/auth";
 import { collection, deleteDoc, doc, onSnapshot, orderBy, query, setDoc } from "firebase/firestore";
 import { auth, db, firebaseConfigured } from "@/lib/firebase";
-import { asLead, DEFAULT_SETTINGS, type Lead, type Settings } from "@/lib/leads";
+import { asLead, asSettings, DEFAULT_SETTINGS, type Lead, type Settings } from "@/lib/leads";
+import { logError } from "@/lib/log";
+
+type RawDoc = { id: string; data: Record<string, unknown> };
 
 type Ctx = {
   user: User;
@@ -32,12 +35,24 @@ export function newLeadId() {
 
 export default function AppProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [leads, setLeads] = useState<Lead[]>([]);
+  const [raw, setRaw] = useState<RawDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
 
   useEffect(() => (firebaseConfigured ? onAuthStateChanged(auth, setUser) : setUser(null)), []);
+
+  // Catch any unexpected crash and keep it in the error log.
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) => logError("app crash", e.error || e.message, { file: e.filename, line: e.lineno });
+    const onRej = (e: PromiseRejectionEvent) => logError("unhandled", e.reason);
+    window.addEventListener("error", onErr);
+    window.addEventListener("unhandledrejection", onRej);
+    return () => {
+      window.removeEventListener("error", onErr);
+      window.removeEventListener("unhandledrejection", onRej);
+    };
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -47,7 +62,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       query(collection(db, "leads"), orderBy("createdAt", "desc")),
       { includeMetadataChanges: true },
       (snap) => {
-        setLeads(snap.docs.map((d) => asLead(d.id, d.data())));
+        setRaw(snap.docs.map((d) => ({ id: d.id, data: d.data() })));
         setLoading(false);
         if (!snap.metadata.fromCache) {
           clearTimeout(timer);
@@ -55,16 +70,24 @@ export default function AppProvider({ children }: { children: ReactNode }) {
         }
       },
       (err) => {
-        console.error(err);
+        logError("loading leads", err);
         clearTimeout(timer);
         setLoading(false);
         setOffline(true);
       },
     );
-    const unsubSet = onSnapshot(doc(db, "settings", "main"), (s) => {
+    let setupDone = false;
+    const unsubSet = onSnapshot(doc(db, "settings", "main"), { includeMetadataChanges: true }, (s) => {
       const d = s.data();
-      if (d) setSettings({ tpl: typeof d.tpl === "string" && d.tpl ? d.tpl : DEFAULT_SETTINGS.tpl, cc: typeof d.cc === "string" && d.cc ? d.cc : "91" });
-    }, () => {});
+      setSettings(asSettings(d));
+      // First run of version 2: create "Indusfood 2026" and file earlier cards under it.
+      if (!s.metadata.fromCache && !setupDone && !Array.isArray(d?.exhibitions)) {
+        setupDone = true;
+        const ex = { id: "indusfood-2026", name: "Indusfood 2026", city: "", start: "", end: "" };
+        setDoc(doc(db, "settings", "main"), { exhibitions: [ex], currentEx: ex.id, legacyEx: ex.id, autoSwitch: true }, { merge: true })
+          .catch((e) => logError("first-time setup", e));
+      }
+    }, (e) => logError("loading settings", e));
     return () => {
       clearTimeout(timer);
       unsubLeads();
@@ -72,23 +95,25 @@ export default function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [user]);
 
+  const leads = useMemo(() => raw.map((r) => asLead(r.id, r.data, settings.legacyEx)), [raw, settings.legacyEx]);
+
   const value = useMemo<Ctx | null>(() => {
     if (!user) return null;
     return {
       user, leads, loading, offline, settings,
       // Writes resolve once queued locally; Firestore syncs them when the network is back.
       saveLead: async (id, data) => {
-        void setDoc(doc(db, "leads", id), data);
+        setDoc(doc(db, "leads", id), data).catch((e) => logError("saving lead", e, { id }));
       },
       patchLead: async (id, changes) => {
-        void setDoc(doc(db, "leads", id), { ...changes, updatedAt: Date.now() }, { merge: true });
+        setDoc(doc(db, "leads", id), { ...changes, updatedAt: Date.now() }, { merge: true }).catch((e) => logError("updating lead", e, { id }));
       },
       deleteLead: async (id) => {
-        void deleteDoc(doc(db, "leads", id));
+        deleteDoc(doc(db, "leads", id)).catch((e) => logError("deleting lead", e, { id }));
       },
       saveSettings: async (s) => {
         setSettings(s);
-        void setDoc(doc(db, "settings", "main"), s);
+        setDoc(doc(db, "settings", "main"), s).catch((e) => logError("saving settings", e));
       },
       logout: () => void signOut(auth),
     };
@@ -115,6 +140,7 @@ function Login() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const fail = (e: unknown) => {
+    logError("sign in", e);
     const code = (e as { code?: string })?.code || "";
     setErr(
       code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")

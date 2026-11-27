@@ -7,7 +7,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Card Scanner",
-  description: "Scan buyers' visiting cards at Indusfood, save leads and WhatsApp them.",
+  description: "Scan visiting cards at exhibitions, keep buyers and vendors organised, and WhatsApp them.",
   manifest: "/manifest.webmanifest",
   appleWebApp: { capable: true, title: "Card Scanner", statusBarStyle: "default" },
   icons: { icon: "/icon-192.png", apple: "/apple-touch-icon.png" },
