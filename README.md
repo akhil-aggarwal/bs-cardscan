@@ -76,3 +76,5 @@ Also add `localhost` to Firebase's authorized domains (it's usually there alread
 - `components/AppProvider.tsx`: login and live Firestore sync
 - `lib/leads.ts`: card fields, exhibitions, duplicate and company matching, WhatsApp messages, CSV export
 - `firestore.rules`: database security (edit the email!)
+
+-
