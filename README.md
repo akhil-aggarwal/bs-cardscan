@@ -42,10 +42,15 @@ Open the link in Chrome (Android) or Safari (iPhone), sign in, then use **⋮ �
 
 ## Using it
 - **Exhibitions** (Settings): add each fair once (name, city, dates). The current one is shown at the top of the app, and every card you scan is filed under it. With "Switch automatically" on, the app moves to an exhibition on its start date. Use "No exhibition" for office visits.
-- **Scan card:** use **Camera**, or **Gallery** for photos you took earlier (you can select the front and back together). Tap **Read card**, choose **Buyer** or **Vendor**, add notes, then save.
+- **Scan card (fast queue):** take the front (and back) with **Camera** or **Gallery**, then tap **Add card → next** and move straight on to the next card. Cards are read in the background and appear under **Cards to check**. Tap **Check** to see the card photo next to what the AI filled in, fix anything, choose **Buyer** or **Vendor**, then save. The next card opens by itself.
+- **Offline (flights, weak halls):** keep scanning. Cards are kept on the phone and read automatically once there's internet and the app is open.
+- **Free limits:** cards are read at most ~13 a minute. If Gemini's free daily limit is used up, the queue pauses and continues by itself after the reset (about 1:30 pm IST). No card is lost.
 - **Duplicates:** if the card is already saved (same phone, email, or name + company), the app says so. Saving then *updates* that person and records today's meeting instead of creating a copy. Tap "It's a different person" if it isn't the same person.
 - **Companies:** people from the same company (e.g. Nestle) are grouped together automatically. On the scan screen you'll see "Also from Nestle: …", and the dashboard has a **Companies** view.
 - **Voice notes:** tap **Speak note**. Your phone's own dictation is used first, which is free. If it comes out unclear, tap **Use Smart voice** (Gemini). Tick **Hindi / Hinglish** to always use Smart voice. Smart voice can also set the follow-up date and Hot/Warm/Cold from what you say.
+- **Search & filters:** type anything in the dashboard search, e.g. `Bangalore dry fruits` or `Kerala hot`. Every word must match, and old and new city names both work (Cochin = Kochi). **Filters** adds Country → State → City, "Deals in", interest, stage and WhatsApp status. CSV export follows the filters.
+- **Card photos (Settings → Card photos):** keep photos online, or delete them once each card is checked and saved (a small thumbnail stays, so free storage lasts ~39,000 cards instead of ~3,000). You can also delete one card's photo from its editor, or all photos at once.
+- **Card photos:** when kept, every saved card keeps its photo. Open **Edit** in the dashboard to see it beside the details. Tap the photo to enlarge it.
 - **Dashboard:** pick an exhibition and Buyers / Vendors. Totals, charts, the list and the CSV export all follow that choice. Each card shows where and when you met ("Indusfood 2026 · 25 Nov 2026").
 - **Buyers vs vendors:** buyers have sales stages (Sample sent, Quotation sent, Order won) and get your buyer message plus catalogue. Vendors have purchase stages (Sample received, Quotation received, Approved vendor), a "What they supply" field, and their own message with no catalogue.
 - **Settings → Attachments:** your catalogue or price list. Links go into buyer messages, and **Send PDF** shares the actual file.
@@ -76,3 +81,14 @@ Also add `localhost` to Firebase's authorized domains (it's usually there alread
 - `components/AppProvider.tsx`: login and live Firestore sync
 - `lib/leads.ts`: card fields, exhibitions, duplicate and company matching, WhatsApp messages, CSV export
 - `firestore.rules`: database security (edit the email!)
+
+## Staying on free plans
+
+| Service | Free allowance | What this app uses |
+|---|---|---|
+| Gemini API (free tier) | Flash-Lite: 500 requests/day, 15/minute | 1 request per card (+1 per Smart voice note). The queue keeps to ≤13/minute and pauses at the daily limit. Set `GEMINI_MODEL=gemini-3.5-flash-lite`. |
+| Firebase Spark (Firestore) | 1 GiB stored, 50K reads and 20K writes a day | ~300 KB per card with photos (thousands of cards). Each dashboard load reads each card once. |
+| Vercel Hobby | 100K function calls a month; Blob 1 GB storage, 10 GB downloads | 1–2 calls per card. The catalogue is cached on the phone. |
+| GitHub | Free | Public repo (no keys inside). |
+
+Notes: Vercel's Hobby plan is for personal, non-commercial use. On Gemini's free tier, Google may use what you send (card photos) to improve its products.

@@ -3,7 +3,8 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import {
   onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut, type User,
 } from "firebase/auth";
-import { collection, deleteDoc, doc, onSnapshot, orderBy, query, setDoc } from "firebase/firestore";
+import { collection, deleteDoc, doc, getCountFromServer, getDoc, getDocs, limit, onSnapshot, orderBy, query, setDoc } from "firebase/firestore";
+import QueueProvider from "./QueueProvider";
 import { auth, db, firebaseConfigured } from "@/lib/firebase";
 import { asLead, asSettings, DEFAULT_SETTINGS, type Lead, type Settings } from "@/lib/leads";
 import { logError } from "@/lib/log";
@@ -19,6 +20,12 @@ type Ctx = {
   saveLead: (id: string, data: Omit<Lead, "id">) => Promise<void>;
   patchLead: (id: string, changes: Partial<Omit<Lead, "id">>) => Promise<void>;
   deleteLead: (id: string) => Promise<void>;
+  /** Card photos are kept in their own small collection so the dashboard list stays fast. */
+  savePhotos: (id: string, front: string, back: string, onlyIfNone?: boolean) => Promise<void>;
+  loadPhotos: (id: string) => Promise<{ front: string; back: string } | null>;
+  deletePhotos: (id: string) => Promise<void>;
+  countPhotos: () => Promise<number>;
+  deleteAllPhotos: () => Promise<number>;
   saveSettings: (s: Settings) => Promise<void>;
   logout: () => void;
 };
@@ -110,6 +117,40 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       },
       deleteLead: async (id) => {
         deleteDoc(doc(db, "leads", id)).catch((e) => logError("deleting lead", e, { id }));
+        deleteDoc(doc(db, "photos", id)).catch(() => {});
+      },
+      savePhotos: async (id, front, back, onlyIfNone) => {
+        if (!front && !back) return;
+        try {
+          if (onlyIfNone && (await getDoc(doc(db, "photos", id))).exists()) return;
+        } catch { /* offline: just write */ }
+        setDoc(doc(db, "photos", id), { front: front || "", back: back || "", at: Date.now() })
+          .catch((e) => logError("saving card photos", e, { id, kb: Math.round((front.length + back.length) / 1024) }));
+      },
+      loadPhotos: async (id) => {
+        try {
+          const d = (await getDoc(doc(db, "photos", id))).data();
+          const ok = (v: unknown) => (typeof v === "string" && v.startsWith("data:image/jpeg;base64,") ? v : "");
+          return d ? { front: ok(d.front), back: ok(d.back) } : null;
+        } catch (e) {
+          logError("loading card photos", e, { id });
+          return null;
+        }
+      },
+      deletePhotos: async (id) => {
+        await deleteDoc(doc(db, "photos", id)).catch((e) => logError("deleting card photo", e, { id }));
+      },
+      countPhotos: async () => (await getCountFromServer(collection(db, "photos"))).data().count,
+      deleteAllPhotos: async () => {
+        let n = 0;
+        // in batches, so a big clean-up doesn't time out
+        for (;;) {
+          const snap = await getDocs(query(collection(db, "photos"), limit(200)));
+          if (snap.empty) break;
+          await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
+          n += snap.size;
+        }
+        return n;
       },
       saveSettings: async (s) => {
         setSettings(s);
@@ -131,7 +172,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
   }
   if (user === undefined) return <div className="center"><p className="muted">Loading…</p></div>;
   if (!user || !value) return <Login />;
-  return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
+  return <AppCtx.Provider value={value}><QueueProvider>{children}</QueueProvider></AppCtx.Provider>;
 }
 
 function Login() {

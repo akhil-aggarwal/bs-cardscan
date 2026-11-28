@@ -24,7 +24,7 @@ Today is ${todayStr}. If he says when to follow up (a date, a day, "next week", 
 Reply with ONLY JSON: {"note":"","followUp":"","interest":""}. If nothing understandable was said, note is "".`;
 
   const r = await geminiJson([{ text: prompt }, { inline_data: { mime_type: "audio/wav", data: audio } }]);
-  if (!r.ok) return NextResponse.json({ error: r.error, detail: r.detail }, { status: r.status });
+  if (!r.ok) return NextResponse.json({ error: r.error, code: r.code, detail: r.detail }, { status: r.status });
   const p = r.json;
   const note = typeof p.note === "string" ? p.note.trim() : "";
   const followUp = typeof p.followUp === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.followUp) ? p.followUp : "";

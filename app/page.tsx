@@ -1,15 +1,13 @@
 "use client";
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
-import { auth } from "@/lib/firebase";
+import { useRef, useState } from "react";
 import { logError } from "@/lib/log";
-import {
-  effectiveEx, emptyLead, exName, findDuplicate, fmtDay, lastVisit, mergeInto, sameCompany, shrinkImage, waLink, waNumber,
-  type Lead, type LeadFields as Fields,
-} from "@/lib/leads";
+import { effectiveEx, exName, lastVisit, waLink } from "@/lib/leads";
+import { compress, type QueueItem } from "@/lib/queue";
 import { newLeadId, useApp } from "@/components/AppProvider";
+import { useQueue } from "@/components/QueueProvider";
 import Shell from "@/components/Shell";
-import LeadFields from "@/components/LeadFields";
+import ReviewSheet from "@/components/ReviewSheet";
 import { useFileShare } from "@/components/useFileShare";
 
 type Side = "front" | "back";
@@ -19,17 +17,31 @@ const CamIcon = () => (
 const GalIcon = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="2" /><path d="m21 17-5-5-9 8" /></svg>
 );
+const timeIST = (ts: number) => new Date(ts).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+
+function statusText(i: QueueItem, online: boolean, pause: { until: number; reason: string }) {
+  if (i.status === "ready") return { t: "Ready to check", c: "ok" };
+  if (i.status === "failed") return { t: "Couldn't read — tap to type it in", c: "bad" };
+  if (i.status === "reading") return { t: "Reading…", c: "busy" };
+  if (!online) return { t: "Waiting for internet", c: "wait" };
+  if (pause.until > Date.now()) {
+    if (pause.reason === "daily") return { t: `Free daily limit used — continues at ${timeIST(pause.until)}`, c: "wait" };
+    if (pause.reason === "login") return { t: "Waiting for sign-in", c: "wait" };
+    return { t: "In line (pacing to stay free)", c: "wait" };
+  }
+  if (i.attempts > 0) return { t: `Retrying soon (try ${i.attempts + 1})`, c: "wait" };
+  return { t: "In line", c: "wait" };
+}
 
 export default function ScanPage() {
-  const { leads, settings, saveLead, patchLead } = useApp();
+  const { leads, settings, patchLead } = useApp();
+  const q = useQueue();
   const ex = effectiveEx(settings);
   const [files, setFiles] = useState<Record<Side, File | null>>({ front: null, back: null });
   const [previews, setPreviews] = useState<Record<Side, string>>({ front: "", back: "" });
-  const [form, setForm] = useState<Fields | null>(null);
-  const [thumb, setThumb] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [forceNew, setForceNew] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [msg, setMsg] = useState<{ t: string; err?: boolean }>({ t: "" });
+  const [open, setOpen] = useState<string | null>(null); // queue id, or "manual"
   const { canShare, share } = useFileShare(settings);
   const inputs = useRef<HTMLInputElement[]>([]);
 
@@ -40,91 +52,46 @@ export default function ScanPage() {
       return { ...p, [side]: f ? URL.createObjectURL(f) : "" };
     });
   };
-  // From the gallery you can pick two photos at once: first = front, second = back.
   const onFiles = (side: Side, list: FileList | null) => {
     const arr = Array.from(list || []).filter((f) => f.type.startsWith("image/") || !f.type);
     if (!arr.length) return;
-    if (arr.length >= 2) { pick("front", arr[0]); pick("back", arr[1]); }
-    else pick(side, arr[0]);
+    if (arr.length >= 2) { pick("front", arr[0]); pick("back", arr[1]); } else pick(side, arr[0]);
   };
-  const reset = () => {
-    pick("front", null);
-    pick("back", null);
-    setForm(null);
-    setThumb("");
-    setForceNew(false);
-    inputs.current.forEach((i) => i && (i.value = ""));
-  };
+  const clearTiles = () => { pick("front", null); pick("back", null); inputs.current.forEach((i) => i && (i.value = "")); };
 
-  async function read() {
-    const list = [files.front, files.back].filter(Boolean) as File[];
-    if (!list.length) return;
-    setBusy(true);
-    setMsg({ t: "Reading the card — usually 5–15 seconds." });
+  async function addCard() {
+    const f = files.front || files.back;
+    if (!f) return;
+    setAdding(true);
     try {
-      const images = await Promise.all(list.map((f) => shrinkImage(f, 1600, 0.85)));
-      setThumb(await shrinkImage(list[0], 360, 0.6));
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ images }),
-      });
-      const data = await res.json().catch(() => ({ error: "Unexpected reply from the server." }));
-      if (!res.ok) {
-        logError("reading card", data.error, { status: res.status, detail: data.detail });
-        throw new Error(data.error || "Could not read the card.");
-      }
-      const base = form || emptyLead(ex);
-      setForm({ ...base, ...data, kind: base.kind, interest: base.interest, notes: base.notes, followUp: base.followUp, visits: base.visits });
-      setForceNew(false);
-      setMsg({ t: "Check the details below, add your notes, then save." });
+      // ~150 KB per side: sharp enough to read and check, small enough that Firebase's free 1 GB holds thousands of cards
+      const front = await compress(f, 1280, 150_000);
+      const back = files.front && files.back ? await compress(files.back, 1280, 150_000) : "";
+      const thumb = await compress(f, 360, 25_000);
+      await q.add({ id: newLeadId(), createdAt: Date.now(), ex, front, back, thumb });
+      clearTiles();
+      const n = q.items.length + 1;
+      setMsg({ t: navigator.onLine ? `Card added (${n} in queue). Reading in the background — take the next card.` : `Card saved on this phone (${n} in queue). It will be read when you're back online.` });
     } catch (e) {
-      if (!(e instanceof Error) || !e.message) logError("reading card", e);
-      setMsg({ t: (e as Error).message || "Could not read the card. Try again, or type manually.", err: true });
-      if (!form) setForm(emptyLead(ex));
+      logError("adding card to queue", e);
+      setMsg({ t: "Couldn't save that photo on the phone. Try again, or free up some storage.", err: true });
     } finally {
-      setBusy(false);
+      setAdding(false);
     }
   }
 
-  const dup = useMemo(() => (form && !forceNew ? findDuplicate(form, leads) : null), [form, leads, forceNew]);
-  const colleagues = useMemo(() => (form ? sameCompany(form.company, leads, dup?.lead.id) : []), [form, leads, dup]);
-
-  const valid = () => {
-    if (form && (form.name || form.company || form.phones || form.email)) return true;
-    setMsg({ t: "Add at least a name, company, phone or email.", err: true });
-    return false;
-  };
-
-  function saveNew(sentWa: boolean) {
-    if (!form || !valid()) return;
-    const now = Date.now();
-    const visits = form.visits.length ? form.visits.map((v) => ({ ...v, at: now })) : [{ ex, at: now }];
-    void saveLead(newLeadId(), { ...form, visits, stage: sentWa && form.stage === "New" ? "Contacted" : form.stage, thumb, createdAt: now, updatedAt: now, waSent: sentWa ? now : 0 });
-    setMsg({ t: `${form.name || form.company} saved${sentWa ? " — WhatsApp opened." : "."}` });
-    reset();
-  }
-
-  function updateExisting(old: Lead, sentWa: boolean) {
-    if (!form) return;
-    const ch = mergeInto(old, form, form.visits[0]?.ex ?? ex);
-    if (thumb && !old.thumb) ch.thumb = thumb;
-    if (sentWa) { ch.waSent = Date.now(); if (old.stage === "New") ch.stage = "Contacted"; }
-    void patchLead(old.id, ch);
-    setMsg({ t: `${old.name || old.company} updated${ch.visits ? " — this meeting was added" : ""}${sentWa ? ", WhatsApp opened" : ""}.` });
-    reset();
-  }
-
-  const save = (sentWa: boolean) => (dup ? updateExisting(dup.lead, sentWa) : saveNew(sentWa));
-  const link = form ? waLink(form, settings) : "";
-  const showPdf = canShare && form?.kind !== "Vendor";
+  const sorted = [...q.items].sort((a, b) => {
+    const rank = (i: QueueItem) => (i.status === "ready" ? 0 : i.status === "failed" ? 1 : 2);
+    return rank(a) - rank(b) || a.createdAt - b.createdAt;
+  });
+  const openItem = q.items.find((i) => i.id === open) || null;
+  const nextReady = (skip: string) => sorted.find((i) => i.id !== skip && (i.status === "ready" || i.status === "failed"));
 
   return (
     <Shell>
       <main className="wrap two">
         <section>
-          <h2>Scan a visiting card</h2>
+          <h2>Scan visiting cards</h2>
           <p className="exbar">Saving to <b>{exName(ex, settings)}</b> · <Link href="/settings#exhibitions">change</Link></p>
           <div className="tiles">
             {(["front", "back"] as Side[]).map((side, i) => (
@@ -149,65 +116,47 @@ export default function ScanPage() {
               </div>
             ))}
           </div>
-          <p className="muted small">Tip: in Gallery you can select the front and back together.</p>
           <div className="row">
-            <button className="btn pri" disabled={busy || !(files.front || files.back)} onClick={read}>
-              {busy ? <><span className="spin" /> Reading…</> : "Read card"}
+            <button className="btn pri" disabled={adding || !(files.front || files.back)} onClick={addCard}>
+              {adding ? <><span className="spin" /> Saving…</> : "Add card → next"}
             </button>
-            <button className="btn" onClick={() => setForm(form || emptyLead(ex))}>Type manually</button>
+            <button className="btn" onClick={() => setOpen("manual")}>Type manually</button>
           </div>
-          <p className={"status" + (msg.err ? " err" : "")} role="status">{msg.t}</p>
+          <p className={"status" + (msg.err ? " err" : "")} role="status">{msg.t || "Photograph the front (and back), tap Add card, and carry on with the next one. Cards are read in the background."}</p>
+          {!q.online && <p className="offline-note">You&apos;re offline. Keep scanning — cards are kept on this phone and read automatically when the internet is back (with the app open).</p>}
 
-          {form && (
-            <form className="panelform" autoComplete="off" onSubmit={(e) => { e.preventDefault(); save(false); }}>
-              {dup && (
-                <div className="dup" role="alert">
-                  <b>Already saved — {dup.reason}</b>
-                  <div className="dup-who">
+          <div className="qhead">
+            <h2>Cards to check {q.readyCount > 0 && <span className="pill">{q.readyCount}</span>}</h2>
+            {q.pendingCount > 0 && <span className="m">{q.pendingCount} still being read</span>}
+          </div>
+          {!q.items.length && <div className="empty">No cards waiting. Scanned cards appear here to check and save.</div>}
+          <div className="qlist">
+            {sorted.map((i) => {
+              const st = statusText(i, q.online, q.pause);
+              const clickable = i.status === "ready" || i.status === "failed";
+              return (
+                <div key={i.id} className={"qitem " + st.c}>
+                  <button type="button" className="qmain" disabled={!clickable} onClick={() => setOpen(i.id)}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    {dup.lead.thumb ? <img src={dup.lead.thumb} alt="" /> : null}
-                    <div>
-                      <div>{dup.lead.name || "(no name)"}{dup.lead.company ? `, ${dup.lead.company}` : ""}</div>
-                      <div className="m">First met: {exName(dup.lead.visits[0]?.ex || "", settings)} · {fmtDay(dup.lead.visits[0]?.at || dup.lead.createdAt)}{dup.lead.visits.length > 1 ? ` · met ${dup.lead.visits.length} times` : ""}</div>
-                    </div>
-                  </div>
-                  <p className="m">Saving will <b>update this person</b>: blank details get filled, new numbers and notes are added, and today&apos;s meeting is recorded.</p>
-                  <div className="acts">
-                    <Link className="btn" href={`/dashboard?edit=${encodeURIComponent(dup.lead.id)}`}>Open existing</Link>
-                    <button type="button" className="btn" onClick={() => setForceNew(true)}>It&apos;s a different person</button>
-                  </div>
+                    <img src={i.thumb} alt="" />
+                    <span>
+                      <b>{i.fields?.name || i.fields?.company || (i.status === "ready" ? "(no name read)" : "New card")}</b>
+                      {i.fields?.company && i.fields?.name && <span className="m"> · {i.fields.company}</span>}
+                      <span className={"qst " + st.c}>{st.c === "busy" && <span className="spin dark" />}{st.t}</span>
+                    </span>
+                  </button>
+                  {clickable
+                    ? <button type="button" className="btn pri" onClick={() => setOpen(i.id)}>Check</button>
+                    : <button type="button" className="btn danger-txt" onClick={() => void q.remove(i.id)} aria-label="Remove from queue">✕</button>}
                 </div>
-              )}
-              {!dup && colleagues.length > 0 && (
-                <p className="cohint">Also from <b>{form.company}</b>: {colleagues.slice(0, 3).map((c) => [c.name || "(no name)", c.designation].filter(Boolean).join(" – ")).join("; ")}{colleagues.length > 3 ? ` and ${colleagues.length - 3} more` : ""}. They&apos;ll be grouped together.</p>
-              )}
-              <LeadFields value={form} onChange={setForm} settings={settings} />
-              <div className="row">
-                <a
-                  className="btn wa"
-                  href={link || undefined}
-                  aria-disabled={!link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => { if (!link || !valid()) { e.preventDefault(); return; } save(true); }}
-                >{dup ? "Update & WhatsApp" : "Save & WhatsApp"}</a>
-                {showPdf && (
-                  <button className="btn wa-out" type="button" onClick={() => {
-                    if (!valid()) return;
-                    void share(form).then((ok) => { if (ok) save(true); });
-                  }}>Send PDF</button>
-                )}
-                <button className="btn pri" type="submit">{dup ? `Update ${dup.lead.name.split(" ")[0] || "existing"}` : "Save lead"}</button>
-                <button className="btn" type="button" onClick={() => { reset(); setMsg({ t: "" }); }}>Clear</button>
-              </div>
-              <p className="muted small">{link ? `WhatsApp to +${waNumber(form.whatsapp || form.phones, settings.cc)} · ${form.kind === "Vendor" ? "vendor" : "buyer"} message` : "Add a phone or WhatsApp number to send a message."}</p>
-            </form>
-          )}
+              );
+            })}
+          </div>
         </section>
 
         <section>
           <h2>Recent cards</h2>
-          {!leads.length && <div className="empty">No cards yet. Take a photo of a card to start.</div>}
+          {!leads.length && <div className="empty">No saved cards yet.</div>}
           {leads.slice(0, 5).map((l) => {
             const wl = waLink(l, settings);
             const lv = lastVisit(l, settings);
@@ -231,6 +180,20 @@ export default function ScanPage() {
           {leads.length > 0 && <div className="row"><Link className="btn" href="/dashboard">See all cards in the dashboard</Link></div>}
         </section>
       </main>
+
+      {open && (open === "manual" || openItem) && (
+        <ReviewSheet
+          key={open}
+          item={open === "manual" ? null : openItem}
+          ex={ex}
+          onClose={() => setOpen(null)}
+          onSaved={(m) => {
+            setMsg({ t: m });
+            const nx = open === "manual" ? null : nextReady(open);
+            setOpen(nx ? nx.id : null); // straight on to the next card to check
+          }}
+        />
+      )}
     </Shell>
   );
 }

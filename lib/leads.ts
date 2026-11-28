@@ -24,6 +24,7 @@ export type Lead = {
   website: string;
   address: string;
   city: string;
+  state: string;
   country: string;
   gst: string;
   products: string; // buyers: their business; vendors: what they supply
@@ -50,6 +51,7 @@ export const TEXT_FIELDS: { key: keyof LeadFields; label: string; vendorLabel?: 
   { key: "website", label: "Website" },
   { key: "address", label: "Address", full: true },
   { key: "city", label: "City" },
+  { key: "state", label: "State / region" },
   { key: "country", label: "Country" },
   { key: "gst", label: "GST / Reg. no." },
   { key: "products", label: "Their products / business", vendorLabel: "What they supply" },
@@ -57,7 +59,7 @@ export const TEXT_FIELDS: { key: keyof LeadFields; label: string; vendorLabel?: 
 
 export const emptyLead = (ex = ""): LeadFields => ({
   kind: "Buyer", name: "", designation: "", company: "", phones: "", whatsapp: "", email: "", website: "", address: "",
-  city: "", country: "", gst: "", products: "", notes: "", interest: "", stage: "New", followUp: "",
+  city: "", state: "", country: "", gst: "", products: "", notes: "", interest: "", stage: "New", followUp: "",
   visits: [{ ex, at: Date.now() }],
 });
 
@@ -83,6 +85,7 @@ export type Settings = {
   currentEx: string; // "" = no exhibition
   autoSwitch: boolean; // pick the exhibition whose dates include today
   legacyEx: string; // exhibition given to leads saved before exhibitions existed
+  keepPhotos: boolean; // false = card photos are only used for checking, then deleted (a small thumbnail stays)
 };
 
 export const DEFAULT_TEMPLATE = `Hello {name},
@@ -107,7 +110,7 @@ Bansal Snax`;
 
 export const DEFAULT_SETTINGS: Settings = {
   tpl: DEFAULT_TEMPLATE, vendorTpl: DEFAULT_VENDOR_TEMPLATE, cc: "91", attachments: [],
-  exhibitions: [], currentEx: "", autoSwitch: true, legacyEx: "",
+  exhibitions: [], currentEx: "", autoSwitch: true, legacyEx: "", keepPhotos: true,
 };
 
 export function asAttachments(v: unknown): Attachment[] {
@@ -143,6 +146,7 @@ export function asSettings(d: Record<string, unknown> | undefined): Settings {
     exhibitions: asExhibitions(d.exhibitions),
     currentEx: str(d.currentEx),
     autoSwitch: d.autoSwitch !== false,
+    keepPhotos: d.keepPhotos !== false,
     legacyEx: str(d.legacyEx),
   };
 }
@@ -302,8 +306,8 @@ export function waLink(l: Pick<LeadFields, "whatsapp" | "phones" | "name" | "com
 
 /* ---------------- export ---------------- */
 
-const CSV_COLS: (keyof Lead)[] = ["kind", "name", "designation", "company", "phones", "whatsapp", "email", "website", "address", "city", "country", "gst", "products", "interest", "stage", "followUp", "notes"];
-const CSV_HEAD = ["Type", "Name", "Designation", "Company", "Phones", "WhatsApp", "Email", "Website", "Address", "City", "Country", "GST", "Products / supplies", "Interest", "Stage", "Follow-up", "Notes", "Exhibition", "First met", "All meetings", "WhatsApp sent"];
+const CSV_COLS: (keyof Lead)[] = ["kind", "name", "designation", "company", "phones", "whatsapp", "email", "website", "address", "city", "state", "country", "gst", "products", "interest", "stage", "followUp", "notes"];
+const CSV_HEAD = ["Type", "Name", "Designation", "Company", "Phones", "WhatsApp", "Email", "Website", "Address", "City", "State", "Country", "GST", "Products / supplies", "Interest", "Stage", "Follow-up", "Notes", "Exhibition", "First met", "All meetings", "WhatsApp sent"];
 
 export function toRows(leads: Lead[], s: Settings): string[][] {
   return [CSV_HEAD, ...leads.map((l) => [

@@ -13,6 +13,10 @@ service cloud.firestore {
     match /settings/{id} {
       allow read, write: if allowed();
     }
+    // Card photos (kept separately so the card list stays fast)
+    match /photos/{id} {
+      allow read, write: if allowed();
+    }
     // Error log (Settings → Error log)
     match /logs/{id} {
       allow read, write: if allowed();

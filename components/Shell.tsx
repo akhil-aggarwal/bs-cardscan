@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApp } from "./AppProvider";
+import { useQueue } from "./QueueProvider";
 import { effectiveEx, exName } from "@/lib/leads";
 
 const TABS = [
@@ -14,6 +15,7 @@ const TABS = [
 export default function Shell({ children }: { children: ReactNode }) {
   const path = usePathname();
   const { leads, offline, settings } = useApp();
+  const { readyCount } = useQueue();
   return (
     <>
       <header className="top">
@@ -23,7 +25,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         </div>
         <nav className="tabs">
           {TABS.map((t) => (
-            <Link key={t.href} href={t.href} aria-current={path === t.href ? "page" : undefined}>{t.label}</Link>
+            <Link key={t.href} href={t.href} aria-current={path === t.href ? "page" : undefined}>
+              {t.label}{t.href === "/" && readyCount > 0 && <span className="pill" aria-label={`${readyCount} cards to check`}>{readyCount}</span>}
+            </Link>
           ))}
         </nav>
       </header>

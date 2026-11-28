@@ -4,6 +4,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useApp } from "@/components/AppProvider";
 import Shell from "@/components/Shell";
 import LeadFields from "@/components/LeadFields";
+import PhotoPanel from "@/components/PhotoPanel";
+import { haystack, matchesSearch, placeOf } from "@/lib/places";
 import { useFileShare } from "@/components/useFileShare";
 import {
   BUYER_STAGES, VENDOR_STAGES, WON, downloadCsv, effectiveEx, exName, fmtDate, fmtDayShort, groupCompanies, isDue, lastVisit,
@@ -33,7 +35,9 @@ function Seg<T extends string>({ value, onChange, options, label }: { value: T; 
 const ALL_STAGES = [...new Set([...BUYER_STAGES, ...VENDOR_STAGES])];
 
 function Dashboard() {
-  const { leads, settings, patchLead, deleteLead, loading } = useApp();
+  const { leads, settings, patchLead, deleteLead, loading, loadPhotos, deletePhotos } = useApp();
+  const [photos, setPhotos] = useState<{ front: string; back: string; stored: boolean } | null>(null);
+  const [confirmPhotoDel, setConfirmPhotoDel] = useState(false);
   const { canShare, share } = useFileShare(settings);
   const params = useSearchParams();
   const router = useRouter();
@@ -43,6 +47,11 @@ function Dashboard() {
   const [kind, setKind] = useState<"all" | "Buyer" | "Vendor">("all");
   const [view, setView] = useState<"people" | "companies">("people");
   const [q, setQ] = useState("");
+  const [fCountry, setFCountry] = useState("");
+  const [fState, setFState] = useState("");
+  const [fCity, setFCity] = useState("");
+  const [fDeals, setFDeals] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
   const [fInt, setFInt] = useState("");
   const [fStage, setFStage] = useState("");
   const [fWa, setFWa] = useState("");
@@ -65,8 +74,11 @@ function Dashboard() {
 
   function openEdit(l: Lead) {
     const { id, thumb, createdAt, updatedAt, waSent, ...v } = l;
-    void thumb; void createdAt; void updatedAt; void waSent;
+    void createdAt; void updatedAt; void waSent;
     setEdit({ id, v });
+    setPhotos(null);
+    setConfirmPhotoDel(false);
+    void loadPhotos(id).then((p) => setPhotos(p && (p.front || p.back) ? { ...p, stored: true } : { front: thumb, back: "", stored: false }));
   }
   const markSent = (l: Pick<Lead, "id" | "stage">) => void patchLead(l.id, { waSent: Date.now(), stage: l.stage === "New" ? "Contacted" : l.stage });
 
@@ -83,7 +95,8 @@ function Dashboard() {
   const locations = useMemo(() => {
     const m: Record<string, number> = {};
     for (const l of scope) {
-      const k = (l.country && !/^india$/i.test(l.country) ? l.country : l.city || l.country).trim();
+      const p = placeOf(l);
+      const k = p.country && p.country !== "India" ? p.country : p.city || p.state || p.country;
       if (k) m[k] = (m[k] || 0) + 1;
     }
     return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6);
@@ -95,13 +108,32 @@ function Dashboard() {
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   }, [scope, settings]);
 
+  /* every card's tidied location and searchable text, worked out once */
+  const meta = useMemo(() => new Map(scope.map((l) => [l.id, { place: placeOf(l), hay: haystack(l, settings), deals: `${l.products} ${l.notes}`.toLowerCase() }])), [scope, settings]);
+  const opts = (pick: (p: { country: string; state: string; city: string }) => string, keep: (p: { country: string; state: string; city: string }) => boolean) => {
+    const m: Record<string, number> = {};
+    for (const x of meta.values()) if (keep(x.place)) { const v = pick(x.place); if (v) m[v] = (m[v] || 0) + 1; }
+    return Object.entries(m).sort((a, b) => a[0].localeCompare(b[0]));
+  };
+  const countryOpts = opts((p) => p.country, () => true);
+  const stateOpts = opts((p) => p.state, (p) => !fCountry || p.country === fCountry);
+  const cityOpts = opts((p) => p.city, (p) => (!fCountry || p.country === fCountry) && (!fState || p.state === fState));
+  const nFilters = [fCountry, fState, fCity, fDeals, fInt, fStage, fWa].filter(Boolean).length;
+  const clearFilters = () => { setQ(""); setFCountry(""); setFState(""); setFCity(""); setFDeals(""); setFInt(""); setFStage(""); setFWa(""); };
+
   const rows = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    const r = scope.filter((l) =>
-      (!s || [l.name, l.company, l.city, l.country, l.phones, l.email, l.notes, l.products, l.designation].join(" ").toLowerCase().includes(s)) &&
+    const deals = fDeals.trim().toLowerCase().split(/[\s,]+/).filter(Boolean).map((w) => (w.length > 3 ? w.replace(/(es|s)$/, "") : w));
+    const r = scope.filter((l) => {
+      const m = meta.get(l.id)!;
+      return (!q.trim() || matchesSearch(m.hay, q)) &&
+      (!fCountry || m.place.country === fCountry) &&
+      (!fState || m.place.state === fState) &&
+      (!fCity || m.place.city === fCity) &&
+      (!deals.length || deals.every((w) => m.deals.includes(w))) &&
       (!fInt || (fInt === "-" ? !l.interest : l.interest === fInt)) &&
       (!fStage || (fStage === "due" ? isDue(l) : l.stage === fStage)) &&
-      (!fWa || (fWa === "yes" ? !!l.waSent : !l.waSent)));
+      (!fWa || (fWa === "yes" ? !!l.waSent : !l.waSent));
+    });
     const ir: Record<string, number> = { Hot: 0, Warm: 1, Cold: 2 };
     const lastAt = (l: Lead) => l.visits[l.visits.length - 1]?.at || l.createdAt;
     const by: Record<string, (a: Lead, b: Lead) => number> = {
@@ -113,12 +145,12 @@ function Dashboard() {
       fu: (a, b) => (a.followUp || "9999").localeCompare(b.followUp || "9999"),
     };
     return r.sort(by[sort]);
-  }, [scope, q, fInt, fStage, fWa, sort]);
+  }, [scope, meta, q, fCountry, fState, fCity, fDeals, fInt, fStage, fWa, sort]);
 
   const companies = useMemo(() => groupCompanies(rows), [rows]);
 
   const quick = (k: string, v: string) => {
-    setQ(""); setFInt(k === "int" ? v : ""); setFStage(k === "stage" ? v : ""); setFWa(k === "wa" ? v : "");
+    clearFilters(); setFInt(k === "int" ? v : ""); setFStage(k === "stage" ? v : ""); setFWa(k === "wa" ? v : "");
     if (k === "won") setFStage(kind === "Vendor" ? "Approved vendor" : "Order won");
     document.getElementById("all")?.scrollIntoView({ behavior: "smooth" });
   };
@@ -176,21 +208,64 @@ function Dashboard() {
             <h2>{view === "people" ? "People" : "Companies"}</h2>
             <Seg label="View" value={view} onChange={setView} options={[["people", "People"], ["companies", "Companies"]]} />
           </div>
-          <div className="filters">
-            <input type="search" className="full" placeholder="Search name, company, city, notes, products…" aria-label="Search" value={q} onChange={(e) => setQ(e.target.value)} />
-            <select aria-label="Filter by interest" value={fInt} onChange={(e) => setFInt(e.target.value)}>
-              <option value="">All interest</option><option>Hot</option><option>Warm</option><option>Cold</option><option value="-">Not marked</option>
-            </select>
-            <select aria-label="Filter by stage" value={fStage} onChange={(e) => setFStage(e.target.value)}>
-              <option value="">All stages</option><option value="due">Follow-up due</option>{stageList.map((s) => <option key={s}>{s}</option>)}
-            </select>
-            <select aria-label="Filter by WhatsApp" value={fWa} onChange={(e) => setFWa(e.target.value)}>
-              <option value="">WhatsApp: all</option><option value="no">Not yet sent</option><option value="yes">Sent</option>
-            </select>
-            <select aria-label="Sort" value={sort} onChange={(e) => setSort(e.target.value)}>
-              <option value="new">Newest meeting first</option><option value="old">Oldest first</option><option value="name">Name A–Z</option><option value="company">Company A–Z</option><option value="int">Hot first</option><option value="fu">Follow-up date</option>
-            </select>
+          <div className="searchrow">
+            <input type="search" placeholder="Search anything, e.g. Bangalore dry fruits" aria-label="Search cards" value={q} onChange={(e) => setQ(e.target.value)} />
+            <button type="button" className={"btn" + (showFilters ? " pri" : "")} aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
+              Filters{nFilters > 0 && <span className="pill">{nFilters}</span>}
+            </button>
           </div>
+          <p className="muted small">Every word must match: <i>Cochin hot</i>, <i>Kerala buyer</i>, <i>Dubai cashew</i>. Old and new city names both work (Cochin = Kochi, Bangalore = Bengaluru).</p>
+          {showFilters && (
+            <div className="filterpanel">
+              <div className="filters">
+                <label className="f">Country
+                  <select value={fCountry} onChange={(e) => { setFCountry(e.target.value); setFState(""); setFCity(""); }}>
+                    <option value="">All countries</option>{countryOpts.map(([v, c]) => <option key={v} value={v}>{v} ({c})</option>)}
+                  </select>
+                </label>
+                <label className="f">State / region
+                  <select value={fState} onChange={(e) => { setFState(e.target.value); setFCity(""); }}>
+                    <option value="">All states</option>{stateOpts.map(([v, c]) => <option key={v} value={v}>{v} ({c})</option>)}
+                  </select>
+                </label>
+                <label className="f">City
+                  <select value={fCity} onChange={(e) => setFCity(e.target.value)}>
+                    <option value="">All cities</option>{cityOpts.map(([v, c]) => <option key={v} value={v}>{v} ({c})</option>)}
+                  </select>
+                </label>
+                <label className="f">Deals in / supplies
+                  <input value={fDeals} placeholder="e.g. dry fruits, spices" onChange={(e) => setFDeals(e.target.value)} />
+                </label>
+                <label className="f">Interest
+                  <select value={fInt} onChange={(e) => setFInt(e.target.value)}>
+                    <option value="">All</option><option>Hot</option><option>Warm</option><option>Cold</option><option value="-">Not marked</option>
+                  </select>
+                </label>
+                <label className="f">Stage
+                  <select value={fStage} onChange={(e) => setFStage(e.target.value)}>
+                    <option value="">All stages</option><option value="due">Follow-up due</option>{stageList.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label className="f">WhatsApp
+                  <select value={fWa} onChange={(e) => setFWa(e.target.value)}>
+                    <option value="">All</option><option value="no">Not yet sent</option><option value="yes">Sent</option>
+                  </select>
+                </label>
+                <label className="f">Sort
+                  <select value={sort} onChange={(e) => setSort(e.target.value)}>
+                    <option value="new">Newest meeting first</option><option value="old">Oldest first</option><option value="name">Name A–Z</option><option value="company">Company A–Z</option><option value="int">Hot first</option><option value="fu">Follow-up date</option>
+                  </select>
+                </label>
+              </div>
+              <div className="row"><button className="btn" onClick={clearFilters}>Clear all filters</button></div>
+            </div>
+          )}
+          {nFilters > 0 && !showFilters && (
+            <p className="chips-on">
+              {[fCountry, fState, fCity, fDeals && `deals in "${fDeals}"`, fInt && (fInt === "-" ? "no interest marked" : fInt), fStage && (fStage === "due" ? "follow-up due" : fStage), fWa && (fWa === "yes" ? "WhatsApp sent" : "WhatsApp not sent")].filter(Boolean).map((t) => <span key={String(t)} className="tag t-Cold">{t}</span>)}
+              <button type="button" className="linkbtn" onClick={clearFilters}>Clear</button>
+            </p>
+          )}
           <div className="row">
             <button className="btn" onClick={() => (rows.length ? downloadCsv(rows, settings, scopeLabel) : setNote("Nothing to export."))}>Download CSV ({rows.length})</button>
             <button className="btn" onClick={async () => {
@@ -237,7 +312,7 @@ function Dashboard() {
                     return (
                       <tr key={l.id} className={isDue(l) ? "due" : ""}>
                         <td data-l="Person"><b>{l.name || "(no name)"}</b><span className={`tag k-${l.kind}`}>{l.kind}</span><div className="m">{[l.designation, l.company].filter(Boolean).join(", ")}</div>{l.products && <div className="m">{l.kind === "Vendor" ? "Supplies: " : ""}{l.products}</div>}</td>
-                        <td data-l="Contact"><div>{l.phones}</div><div className="m">{l.email}</div><div className="m">{[l.city, l.country].filter(Boolean).join(", ")}</div></td>
+                        <td data-l="Contact"><div>{l.phones}</div><div className="m">{l.email}</div><div className="m">{(() => { const p = meta.get(l.id)?.place; return p ? [p.city, p.state, p.country].filter(Boolean).join(", ") : ""; })()}</div></td>
                         <td data-l="Met"><div>{lv.label}</div>{lv.more > 0 && <div className="m">+{lv.more} earlier meeting{lv.more > 1 ? "s" : ""}</div>}</td>
                         <td data-l="Interest">
                           <select aria-label="Interest" value={l.interest} onChange={(e) => void patchLead(l.id, { interest: e.target.value as Lead["interest"] })}>
@@ -262,10 +337,35 @@ function Dashboard() {
       </main>
 
       {edit && (
-        <div className="ov" role="dialog" aria-modal="true" aria-labelledby="edH" onClick={(e) => e.target === e.currentTarget && setEdit(null)}>
-          <div className="sheet">
-            <h2 id="edH">Edit {edit.v.name || edit.v.company || "card"}</h2>
-            <p className="m">First scanned {fmtDayShort(leads.find((x) => x.id === edit.id)?.createdAt || 0)}</p>
+        <div className="ov full" role="dialog" aria-modal="true" aria-labelledby="edH">
+          <div className="sheet review-sheet">
+            <div className="rv-head">
+              <h2 id="edH">Edit {edit.v.name || edit.v.company || "card"}</h2>
+              <button type="button" className="btn" onClick={() => setEdit(null)}>Close</button>
+            </div>
+            <div className="rv-grid">
+            <div className="rv-photos">
+              <PhotoPanel front={photos?.front || ""} back={photos?.back || ""} loading={!photos} />
+              {photos && !photos.stored && photos.front && <p className="m">Only a small thumbnail is kept for this card.</p>}
+              {photos?.stored && (
+                <div className="acts" style={{ marginTop: 8 }}>
+                  {confirmPhotoDel ? (
+                    <>
+                      <button type="button" className="btn danger" onClick={() => {
+                        void deletePhotos(edit.id);
+                        setPhotos({ front: leads.find((x) => x.id === edit.id)?.thumb || "", back: "", stored: false });
+                        setConfirmPhotoDel(false);
+                      }}>Yes, delete photo</button>
+                      <button type="button" className="btn" onClick={() => setConfirmPhotoDel(false)}>Keep</button>
+                    </>
+                  ) : (
+                    <button type="button" className="btn danger-txt" onClick={() => setConfirmPhotoDel(true)}>Delete photo (checked)</button>
+                  )}
+                </div>
+              )}
+              <p className="m">First scanned {fmtDayShort(leads.find((x) => x.id === edit.id)?.createdAt || 0)}</p>
+            </div>
+            <div className="rv-form">
             <LeadFields value={edit.v} onChange={(v) => setEdit({ ...edit, v })} settings={settings} showStage />
             <div className="row">
               <a className="btn wa" href={editLink || undefined} aria-disabled={!editLink} target="_blank" rel="noopener noreferrer"
@@ -282,6 +382,8 @@ function Dashboard() {
               <button className="btn" onClick={() => setEdit(null)}>Cancel</button>
             </div>
             <div className="row"><button className="btn danger-txt" onClick={() => { setConfirmDel(leads.find((x) => x.id === edit.id) || null); setEdit(null); }}>Delete card</button></div>
+            </div>
+            </div>
           </div>
         </div>
       )}

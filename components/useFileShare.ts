@@ -18,8 +18,16 @@ export function useFileShare(settings: Settings) {
     }
     Promise.all(
       settings.attachments.map(async (a) => {
-        const r = await fetch(a.url);
-        if (!r.ok) throw new Error("download failed");
+        // Keep a copy on the phone so the catalogue is downloaded once, not on every app open
+        // (Vercel's free plan allows 10 GB of file downloads a month).
+        let r: Response | undefined;
+        const cache = typeof caches !== "undefined" ? await caches.open("attachments").catch(() => undefined) : undefined;
+        if (cache) r = await cache.match(a.url).catch(() => undefined);
+        if (!r) {
+          r = await fetch(a.url);
+          if (!r.ok) throw new Error("download failed");
+          if (cache) await cache.put(a.url, r.clone()).catch(() => {});
+        }
         const b = await r.blob();
         return new File([b], a.fileName, { type: a.type || b.type });
       }),

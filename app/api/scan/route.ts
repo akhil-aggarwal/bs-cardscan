@@ -7,15 +7,16 @@ export const maxDuration = 60;
 
 const PROMPT = `These are photos of ONE business/visiting card collected at a trade exhibition or business meeting in India. The first image is the front; a second image, if present, is the back. Read every bit of text (any language; transliterate to English where possible) and extract the contact details.
 Reply with ONLY a JSON object with exactly these keys:
-{"name":"","designation":"","company":"","phones":["+91 98765 43210"],"whatsapp":"","email":"","website":"","address":"","city":"","country":"","gst":"","products":""}
+{"name":"","designation":"","company":"","phones":["+91 98765 43210"],"whatsapp":"","email":"","website":"","address":"","city":"","state":"","country":"","gst":"","products":""}
 Rules:
 - phones: every phone/mobile number printed, in international format with + and country code when the card's address, country or prefix makes it clear; Indian 10-digit mobiles get +91. Leave out fax numbers.
 - whatsapp: the number marked WhatsApp if any; otherwise the first mobile number; otherwise "".
+- city: the town/city only (e.g. "Kochi", "Bengaluru"). state: the Indian state or the region/province abroad (e.g. "Kerala", "Karnataka", "California"); infer it from the city, PIN code or address if it isn't printed. country: full English name (e.g. "India", "United States", "United Arab Emirates"); if only an Indian address or +91 number is shown, use "India".
 - products: a short phrase of what the company deals in, only if the card says so.
 - If there are several people or emails, keep them all in the field separated by ", ".
 - Use "" for anything not on the card. Never invent details.`;
 
-const KEYS = ["name", "designation", "company", "whatsapp", "email", "website", "address", "city", "country", "gst", "products"] as const;
+const KEYS = ["name", "designation", "company", "whatsapp", "email", "website", "address", "city", "state", "country", "gst", "products"] as const;
 
 export async function POST(req: Request) {
   try {
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
     { text: PROMPT },
     ...images.map((d) => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } })),
   ]);
-  if (!r.ok) return NextResponse.json({ error: r.error, detail: r.detail }, { status: r.status });
+  if (!r.ok) return NextResponse.json({ error: r.error, code: r.code, detail: r.detail }, { status: r.status });
 
   const p = r.json;
   const out: Record<string, string> = {};

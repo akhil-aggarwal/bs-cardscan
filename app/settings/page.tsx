@@ -5,6 +5,7 @@ import { auth } from "@/lib/firebase";
 import { useApp } from "@/components/AppProvider";
 import Shell from "@/components/Shell";
 import ErrorLog from "@/components/ErrorLog";
+import PhotoSettings from "@/components/PhotoSettings";
 import { logError } from "@/lib/log";
 import {
   DEFAULT_TEMPLATE, DEFAULT_VENDOR_TEMPLATE, effectiveEx, fmtDate, fmtSize, newExId, today, waLink,
@@ -203,6 +204,8 @@ export default function SettingsPage() {
           </div>
           <p className="status" role="status">{saved ? "Saved." : ""}</p>
         </section>
+
+        <PhotoSettings />
 
         <ErrorLog />
 
