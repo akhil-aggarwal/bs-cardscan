@@ -92,3 +92,5 @@ Also add `localhost` to Firebase's authorized domains (it's usually there alread
 | GitHub | Free | Public repo (no keys inside). |
 
 Notes: Vercel's Hobby plan is for personal, non-commercial use. On Gemini's free tier, Google may use what you send (card photos) to improve its products.
+
+
